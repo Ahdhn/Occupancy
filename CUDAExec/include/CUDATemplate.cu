@@ -1,33 +1,71 @@
-#include <assert.h>
-#include <cuda_runtime.h>
-#include <stdio.h>
-#include "gtest/gtest.h"
+#include <cuda_runtime_api.h>
+#include <iostream>
 
-#include "CUDALib.h"
+#define CHECK_CUDA(func)                                                     \
+    {                                                                        \
+        cudaError_t status = (func);                                         \
+        if (status != cudaSuccess) {                                         \
+            printf(                                                          \
+                "CUDA API failed at file %s, line %d with error: %s (%d)\n", \
+                __FILE__,                                                    \
+                __LINE__,                                                    \
+                cudaGetErrorString(status),                                  \
+                status);                                                     \
+            exit(EXIT_FAILURE);                                              \
+        }                                                                    \
+    }
 
-__global__ void exec_kernel()
+__global__ void foo()
 {
-    printf("\n I am thread %d from exec_kernel\n", threadIdx.x);
-}
-
-TEST(Test, exe)
-{
-    exec_kernel<<<1, 1>>>();
-    auto err = cudaDeviceSynchronize();
-    EXPECT_EQ(err, cudaSuccess);    
-}
-
-TEST(Test, lib)
-{
-    CUDALib lib;
-    lib.run();
-    auto err = cudaDeviceSynchronize();
-    EXPECT_EQ(err, cudaSuccess);
 }
 
 int main(int argc, char** argv)
 {
-    ::testing::InitGoogleTest(&argc, argv);
+    auto           device = 0;
+    cudaDeviceProp deviceProp;
+    CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, device));
 
-    return RUN_ALL_TESTS();
+    // Setup grid and block properties
+    auto numBlocksPerSm     = 0;
+    auto numThreadsPerBlock = 0;
+    int  shmemPerBlock      = 0;  // bytes
+
+    // Use the max number of threads per block to maximize parallelism over
+    // shmem
+    auto target_occupancy = 2;
+    numThreadsPerBlock    = deviceProp.maxThreadsPerBlock / target_occupancy;
+    shmemPerBlock =
+        (deviceProp.sharedMemPerMultiprocessor - 1024 * target_occupancy) /
+        target_occupancy;
+    
+    int carveout = 100;
+    CHECK_CUDA(cudaFuncSetAttribute(
+        foo, cudaFuncAttributePreferredSharedMemoryCarveout, carveout));
+
+
+    std::cout << "Threads Per Block: " << numThreadsPerBlock << std::endl;
+    std::cout << "Shmem Per Block (bytes): " << shmemPerBlock << std::endl;
+
+    CHECK_CUDA(cudaFuncSetAttribute(
+        foo, cudaFuncAttributeMaxDynamicSharedMemorySize, shmemPerBlock));
+
+    // Need to know the max occupancy to determine how many blocks to launch
+    // for the cooperative kernel. All blocks must be resident on SMs
+    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &numBlocksPerSm, foo, numThreadsPerBlock, shmemPerBlock))
+
+    // See how many registers the kernel uses
+    cudaFuncAttributes attr;
+    CHECK_CUDA(cudaFuncGetAttributes(&attr, foo));
+
+    std::cout << "Registers: " << attr.numRegs << std::endl;
+
+    std::cout << "statically-allocated shared memory per block: "
+              << attr.sharedSizeBytes << std::endl;
+
+    std::cout << "Max Active Blocks Per SM: " << numBlocksPerSm << std::endl;
+
+    foo<<<1024, numThreadsPerBlock>>>();
+
+    CHECK_CUDA(cudaDeviceSynchronize());
 }
